@@ -1,0 +1,5 @@
+tarsau
+*.o
+*.sau
+output/
+d1/
