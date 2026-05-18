@@ -1,4 +1,4 @@
-
+#define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -139,13 +139,33 @@ static long validate_file(const char *yol, long toplam_boyut)
 }
 
 /* ------------------------------------------------------------------ */
-/* build_archive: ileride Aşama 3'te doldurulacak                     */
+/* izin_stringe: stat st_mode değerini "rwxr-xr-x" formatına çevirir */
+/* ------------------------------------------------------------------ */
+static void izin_stringe(unsigned int mod, char *buf)
+{
+    buf[0] = (mod & S_IRUSR) ? 'r' : '-';
+    buf[1] = (mod & S_IWUSR) ? 'w' : '-';
+    buf[2] = (mod & S_IXUSR) ? 'x' : '-';
+    buf[3] = (mod & S_IRGRP) ? 'r' : '-';
+    buf[4] = (mod & S_IWGRP) ? 'w' : '-';
+    buf[5] = (mod & S_IXGRP) ? 'x' : '-';
+    buf[6] = (mod & S_IROTH) ? 'r' : '-';
+    buf[7] = (mod & S_IWOTH) ? 'w' : '-';
+    buf[8] = (mod & S_IXOTH) ? 'x' : '-';
+    buf[9] = '\0';
+}
+
+/* ------------------------------------------------------------------ */
+/* build_archive: .sau dosyasını oluşturur                            */
+/* Format: [10 bayt boyut][|ad,izin,boyut|...][içerik1][içerik2]...  */
 /* ------------------------------------------------------------------ */
 static int build_archive(const char **dosyalar, int adet, const char *cikti)
 {
+    struct stat sb;
+    char izin[10];
     long toplam = 0;
 
-    /* Önce tüm dosyaları doğrula */
+    /* 1. Tüm dosyaları doğrula, boyutları topla */
     for (int i = 0; i < adet; i++) {
         long boyut = validate_file(dosyalar[i], toplam);
         if (boyut < 0)
@@ -153,11 +173,92 @@ static int build_archive(const char **dosyalar, int adet, const char *cikti)
         toplam += boyut;
     }
 
-    (void)cikti;  /* Aşama 3'te kullanılacak */
-    fprintf(stderr, "Dogrulama tamam. Toplam: %ld bayt\n", toplam);
+    /* 2. Organizasyon bölümünü bellekte oluştur */
+    /* Her kayıt en fazla: |255 + 9 + 20 + 2 virgül + 2 boru| ~ 300 bayt */
+    char *org = malloc((size_t)adet * 300 + 1);
+    if (!org) {
+        fprintf(stderr, "Bellek hatasi!\n");
+        return -1;
+    }
+    org[0] = '\0';
+
+    for (int i = 0; i < adet; i++) {
+        if (stat(dosyalar[i], &sb) != 0) {
+            free(org);
+            return -1;
+        }
+        izin_stringe((unsigned int)sb.st_mode, izin);
+
+        /* Sadece dosya adını kullan, yol bileşenlerini at */
+        const char *ad = strrchr(dosyalar[i], '/');
+        ad = ad ? ad + 1 : dosyalar[i];
+
+        /* |ad,izinler,boyut| kaydını ekle */
+        char kayit[350];
+        snprintf(kayit, sizeof(kayit), "|%s,%s,%ld",
+                 ad, izin, (long)sb.st_size);
+        strcat(org, kayit);
+    }
+    strcat(org, "|");  /* son kapanış borusu */
+
+    /* 3. Organizasyon bölümü boyutunu hesapla ve 10 baytlık başlığı oluştur */
+    /* Başlık (10 bayt) + org string = toplam org bölümü */
+    long org_icerik_len = (long)strlen(org);
+    long org_toplam     = ORG_BOYUT_LEN + org_icerik_len;
+
+    char baslik[21];
+    snprintf(baslik, sizeof(baslik), "%010lld", (long long)org_toplam);
+
+    /* 4. Arşiv dosyasını yaz */
+    FILE *cikti_f = fopen(cikti, "wb");
+    if (!cikti_f) {
+        fprintf(stderr, "%s dosyasi olusturulamadi!\n", cikti);
+        free(org);
+        return -1;
+    }
+
+    /* 10 baytlık boyut başlığını yaz */
+    if (fwrite(baslik, 1, ORG_BOYUT_LEN, cikti_f) != (size_t)ORG_BOYUT_LEN) {
+        fprintf(stderr, "Yazma hatasi!\n");
+        fclose(cikti_f);
+        free(org);
+        return -1;
+    }
+
+    /* Organizasyon kayıtlarını yaz */
+    if (fwrite(org, 1, (size_t)org_icerik_len, cikti_f) != (size_t)org_icerik_len) {
+        fprintf(stderr, "Yazma hatasi!\n");
+        fclose(cikti_f);
+        free(org);
+        return -1;
+    }
+    free(org);
+
+    /* 5. Dosya içeriklerini art arda yaz */
+    for (int i = 0; i < adet; i++) {
+        FILE *giris = fopen(dosyalar[i], "rb");
+        if (!giris) {
+            fprintf(stderr, "%s acilamadi!\n", dosyalar[i]);
+            fclose(cikti_f);
+            return -1;
+        }
+
+        char tampon[4096];
+        size_t okunan;
+        while ((okunan = fread(tampon, 1, sizeof(tampon), giris)) > 0) {
+            if (fwrite(tampon, 1, okunan, cikti_f) != okunan) {
+                fprintf(stderr, "Yazma hatasi!\n");
+                fclose(giris);
+                fclose(cikti_f);
+                return -1;
+            }
+        }
+        fclose(giris);
+    }
+
+    fclose(cikti_f);
     return 0;
 }
-
 /* ------------------------------------------------------------------ */
 /* extract_archive: ileride Aşama 4'te doldurulacak                   */
 /* ------------------------------------------------------------------ */
