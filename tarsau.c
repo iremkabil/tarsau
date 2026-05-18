@@ -260,13 +260,133 @@ static int build_archive(const char **dosyalar, int adet, const char *cikti)
     return 0;
 }
 /* ------------------------------------------------------------------ */
-/* extract_archive: ileride Aşama 4'te doldurulacak                   */
+/* izin_moda: "rwxr-xr-x" string'ini mode_t sayısına çevirir         */
+/* ------------------------------------------------------------------ */
+static unsigned int izin_moda(const char *buf)
+{
+    unsigned int mod = 0;
+    if (buf[0] == 'r') mod |= S_IRUSR;
+    if (buf[1] == 'w') mod |= S_IWUSR;
+    if (buf[2] == 'x') mod |= S_IXUSR;
+    if (buf[3] == 'r') mod |= S_IRGRP;
+    if (buf[4] == 'w') mod |= S_IWGRP;
+    if (buf[5] == 'x') mod |= S_IXGRP;
+    if (buf[6] == 'r') mod |= S_IROTH;
+    if (buf[7] == 'w') mod |= S_IWOTH;
+    if (buf[8] == 'x') mod |= S_IXOTH;
+    return mod;
+}
+
+/* ------------------------------------------------------------------ */
+/* extract_archive: .sau dosyasını ayrıştırır ve dosyaları çıkarır   */
 /* ------------------------------------------------------------------ */
 static int extract_archive(const char *arsiv, const char *dizin)
 {
-    (void)arsiv; (void)dizin;
-    fprintf(stderr, "extract_archive: henuz implemente edilmedi\n");
-    return -1;
+    FILE *f = fopen(arsiv, "rb");
+    if (!f) {
+        fprintf(stderr, "Arşiv dosyası uygunsuz veya bozuk!\n");
+        return -1;
+    }
+
+    /* 1. İlk 10 baytı oku: organizasyon bölümü toplam boyutu */
+    char baslik[11] = {0};
+    if (fread(baslik, 1, ORG_BOYUT_LEN, f) != (size_t)ORG_BOYUT_LEN) {
+        fprintf(stderr, "Arşiv dosyası uygunsuz veya bozuk!\n");
+        fclose(f);
+        return -1;
+    }
+
+    long org_toplam = atol(baslik);
+    if (org_toplam <= ORG_BOYUT_LEN) {
+        fprintf(stderr, "Arşiv dosyası uygunsuz veya bozuk!\n");
+        fclose(f);
+        return -1;
+    }
+
+    /* 2. Organizasyon bölümünü oku */
+    long org_icerik_len = org_toplam - ORG_BOYUT_LEN;
+    char *org = malloc((size_t)org_icerik_len + 1);
+    if (!org) {
+        fprintf(stderr, "Bellek hatasi!\n");
+        fclose(f);
+        return -1;
+    }
+
+    if (fread(org, 1, (size_t)org_icerik_len, f) != (size_t)org_icerik_len) {
+        fprintf(stderr, "Arşiv dosyası uygunsuz veya bozuk!\n");
+        free(org);
+        fclose(f);
+        return -1;
+    }
+    org[org_icerik_len] = '\0';
+
+    /* 3. Hedef dizini oluştur (yoksa) */
+    struct stat ds;
+    if (stat(dizin, &ds) != 0) {
+        if (mkdir(dizin, 0755) != 0) {
+            fprintf(stderr, "%s dizini olusturulamadi!\n", dizin);
+            free(org);
+            fclose(f);
+            return -1;
+        }
+    }
+
+    /* 4. Organizasyon bölümünü ayrıştır: |ad,izin,boyut|ad,izin,boyut| */
+    char *p = org;
+    while (*p == '|') {
+        p++;  /* açılış borusunu geç */
+
+        /* Dosya adı */
+        char *ad_bas = p;
+        while (*p && *p != ',') p++;
+        if (*p != ',') break;
+        *p++ = '\0';
+        char ad[256];
+        strncpy(ad, ad_bas, sizeof(ad) - 1);
+        ad[sizeof(ad) - 1] = '\0';
+
+        /* İzin string'i */
+        char izin_str[10] = {0};
+        strncpy(izin_str, p, 9);
+        p += 9;
+        if (*p != ',') break;
+        p++;
+
+        /* Boyut */
+        long boyut = atol(p);
+        while (*p && *p != '|') p++;
+        /* p şimdi kapanış '|' üzerinde, döngü başında geçilecek */
+
+        /* 5. Dosyayı çıkar */
+        char hedef[PATH_MAX];
+        snprintf(hedef, sizeof(hedef), "%s/%s", dizin, ad);
+
+        FILE *cikti = fopen(hedef, "wb");
+        if (!cikti) {
+            fprintf(stderr, "%s dosyasi olusturulamadi!\n", hedef);
+            free(org);
+            fclose(f);
+            return -1;
+        }
+
+        char tampon[4096];
+        long kalan = boyut;
+        while (kalan > 0) {
+            size_t istenen = (kalan > 4096) ? 4096 : (size_t)kalan;
+            size_t okunan = fread(tampon, 1, istenen, f);
+            if (okunan == 0) break;
+            fwrite(tampon, 1, okunan, cikti);
+            kalan -= (long)okunan;
+        }
+        fclose(cikti);
+
+        /* İzinleri geri yükle */
+        chmod(hedef, izin_moda(izin_str));
+    }
+
+    free(org);
+    fclose(f);
+    return 0;
 }
 
 /* ------------------------------------------------------------------ */
