@@ -283,8 +283,11 @@ static unsigned int izin_moda(const char *buf)
 static int extract_archive(const char *arsiv, const char *dizin)
 {
     FILE *f = fopen(arsiv, "rb");
-    if (!f) {
+    /* .sau uzantısı kontrolü */
+    size_t arsiv_len = strlen(arsiv);
+    if (arsiv_len < 4 || strcmp(arsiv + arsiv_len - 4, ".sau") != 0) {
         fprintf(stderr, "Arşiv dosyası uygunsuz veya bozuk!\n");
+        fclose(f);
         return -1;
     }
 
